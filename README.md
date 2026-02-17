@@ -187,12 +187,17 @@ picoclaw onboard
 
 **2. Configure** (`~/.picoclaw/config.json`)
 
+PicoClaw now supports **per-agent fallback models**. Each entry can include a provider tag and multiple candidates; PicoClaw will try them in order, automatically formatting values such as `z.ai/glm-4.7` or `openrouter/z.ai/glm-4.7`.
+
 ```json
 {
   "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
-      "model": "glm-4.7",
+      "models": [
+        { "provider": "z.ai", "model": "glm-4.7" },
+        { "provider": "openrouter", "model": "z.ai/glm-4.7" }
+      ],
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20

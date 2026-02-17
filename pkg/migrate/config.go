@@ -63,15 +63,43 @@ func LoadOpenClawConfig(configPath string) (map[string]interface{}, error) {
 	return result, nil
 }
 
+func getArray(data map[string]interface{}, key string) ([]interface{}, bool) {
+	v, ok := data[key]
+	if !ok {
+		return nil, false
+	}
+	arr, ok := v.([]interface{})
+	return arr, ok
+}
+
 func ConvertConfig(data map[string]interface{}) (*config.Config, []string, error) {
 	cfg := config.DefaultConfig()
 	var warnings []string
 
 	if agents, ok := getMap(data, "agents"); ok {
 		if defaults, ok := getMap(agents, "defaults"); ok {
-			if v, ok := getString(defaults, "model"); ok {
-				cfg.Agents.Defaults.Model = v
+			// Check if new format is already present
+			if models, ok := getArray(defaults, "models"); ok && len(models) > 0 {
+				// New format detected, use it
+				var newModels []config.ModelSpec
+				for _, model := range models {
+					if modelMap, ok := model.(map[string]interface{}); ok {
+						if modelSpec, err := convertModelSpec(modelMap); err == nil {
+							newModels = append(newModels, modelSpec)
+						}
+					}
+				}
+				cfg.Agents.Defaults.Models = newModels
+			} else {
+				// Old format detected, convert it
+				if v, ok := getString(defaults, "model"); ok {
+					cfg.Agents.Defaults.Model = v
+				}
+				if v, ok := getString(defaults, "provider"); ok {
+					cfg.Agents.Defaults.Provider = v
+				}
 			}
+			
 			if v, ok := getFloat(defaults, "max_tokens"); ok {
 				cfg.Agents.Defaults.MaxTokens = int(v)
 			}
@@ -379,4 +407,58 @@ func getStringSlice(data map[string]interface{}, key string) []string {
 		}
 	}
 	return result
+}
+
+// convertModelSpec converts a map[string]interface{} to ModelSpec
+func convertModelSpec(modelMap map[string]interface{}) (config.ModelSpec, error) {
+	spec := config.ModelSpec{}
+	
+	if v, ok := getString(modelMap, "model"); ok {
+		spec.Model = v
+	}
+	if v, ok := getString(modelMap, "provider"); ok {
+		spec.Provider = v
+	}
+	
+	return spec, nil
+}
+
+// IsNewFormat checks if config uses new format (models array)
+func IsNewFormat(cfg *config.Config) bool {
+	return len(cfg.Agents.Defaults.Models) > 0
+}
+
+// NeedsMigration checks if the config needs to be migrated to new format
+func NeedsMigration(cfg *config.Config) bool {
+	// If already in new format, no migration needed
+	if IsNewFormat(cfg) {
+		return false
+	}
+	
+	// If old format has both model and provider, it needs migration
+	return cfg.Agents.Defaults.Model != "" && cfg.Agents.Defaults.Provider != ""
+}
+
+// MigrateToNewFormat converts old format to new format
+func MigrateToNewFormat(cfg *config.Config) error {
+	if !NeedsMigration(cfg) {
+		return nil
+	}
+	
+	// Create new model spec from old format
+	if cfg.Agents.Defaults.Model != "" && cfg.Agents.Defaults.Provider != "" {
+		newModel := config.ModelSpec{
+			Model:    cfg.Agents.Defaults.Model,
+			Provider: cfg.Agents.Defaults.Provider,
+		}
+		cfg.Agents.Defaults.Models = []config.ModelSpec{newModel}
+		
+		// Clear old fields to avoid confusion
+		cfg.Agents.Defaults.Model = ""
+		cfg.Agents.Defaults.Provider = ""
+		
+		return nil
+	}
+	
+	return fmt.Errorf("config does not need migration")
 }

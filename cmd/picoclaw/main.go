@@ -399,7 +399,9 @@ func agentCmd() {
 		os.Exit(1)
 	}
 
-	provider, err := providers.CreateProvider(cfg)
+	cfg.PrepareAgentModels()
+
+	provider, _, err := createProviderWithFallback(cfg)
 	if err != nil {
 		fmt.Printf("Error creating provider: %v\n", err)
 		os.Exit(1)
@@ -534,7 +536,9 @@ func gatewayCmd() {
 		os.Exit(1)
 	}
 
-	provider, err := providers.CreateProvider(cfg)
+	cfg.PrepareAgentModels()
+
+	provider, _, err := createProviderWithFallback(cfg)
 	if err != nil {
 		fmt.Printf("Error creating provider: %v\n", err)
 		os.Exit(1)
@@ -716,7 +720,17 @@ func statusCmd() {
 	}
 
 	if _, err := os.Stat(configPath); err == nil {
-		fmt.Printf("Model: %s\n", cfg.Agents.Defaults.Model)
+		// Display model information for both old and new formats
+		candidates := cfg.Agents.Defaults.ModelCandidates()
+		if len(candidates) > 0 {
+			if len(candidates) == 1 {
+				fmt.Printf("Model: %s\n", candidates[0])
+			} else {
+				fmt.Printf("Models: %s (first: %s)\n", strings.Join(candidates, ", "), candidates[0])
+			}
+		} else {
+			fmt.Printf("Model: %s\n", cfg.Agents.Defaults.Model)
+		}
 
 		hasOpenRouter := cfg.Providers.OpenRouter.APIKey != ""
 		hasAnthropic := cfg.Providers.Anthropic.APIKey != ""
@@ -1004,7 +1018,55 @@ func setupCronTool(agentLoop *agent.AgentLoop, msgBus *bus.MessageBus, workspace
 }
 
 func loadConfig() (*config.Config, error) {
-	return config.LoadConfig(getConfigPath())
+	cfg, err := config.LoadConfig(getConfigPath())
+	if err != nil {
+		return nil, err
+	}
+	
+	// Check if config needs migration (old format detected)
+	if migrate.NeedsMigration(cfg) {
+		fmt.Println("🔄 Detected old config format, upgrading...")
+		if err := migrate.MigrateToNewFormat(cfg); err != nil {
+			fmt.Printf("Warning: Failed to migrate config: %v\n", err)
+		} else {
+			// Save the migrated config
+			if err := config.SaveConfig(getConfigPath(), cfg); err != nil {
+				fmt.Printf("Warning: Could not save migrated config: %v\n", err)
+			} else {
+				fmt.Println("✓ Config upgraded to new format")
+			}
+		}
+	}
+	
+	return cfg, nil
+}
+
+func createProviderWithFallback(cfg *config.Config) (providers.LLMProvider, string, error) {
+	candidates := cfg.Agents.Defaults.ModelCandidates()
+	if len(candidates) == 0 && cfg.Agents.Defaults.Model != "" {
+		candidates = []string{cfg.Agents.Defaults.Model}
+	}
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("no model configured for agent defaults")
+	}
+
+	var lastErr error
+	for _, candidate := range candidates {
+		cfg.Agents.Defaults.Model = candidate
+		provider, err := providers.CreateProvider(cfg)
+		if err == nil {
+			if len(candidates) > 1 {
+				logger.InfoCF("provider", "Selected model candidate", map[string]interface{}{"model": candidate})
+			}
+			return provider, candidate, nil
+		}
+		lastErr = err
+		logger.DebugCF("provider", "Model candidate failed", map[string]interface{}{
+			"model": candidate,
+			"error": err.Error(),
+		})
+	}
+	return nil, "", fmt.Errorf("failed to create provider for any configured model: %w", lastErr)
 }
 
 func cronCmd() {

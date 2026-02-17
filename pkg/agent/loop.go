@@ -42,6 +42,7 @@ type AgentLoop struct {
 	tools          *tools.ToolRegistry
 	running        atomic.Bool
 	summarizing    sync.Map // Tracks which sessions are currently being summarized
+	config         *config.Config
 }
 
 // processOptions configures how a message is processed
@@ -49,6 +50,7 @@ type processOptions struct {
 	SessionKey      string // Session identifier for history/context
 	Channel         string // Target channel for tool execution
 	ChatID          string // Target chat ID for tool execution
+	SenderID        string // User/sender identifier for routing
 	UserMessage     string // User message content (may include prefix)
 	DefaultResponse string // Response when LLM returns empty
 	EnableSummary   bool   // Whether to trigger summarization
@@ -146,6 +148,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		contextBuilder: contextBuilder,
 		tools:          toolsRegistry,
 		summarizing:    sync.Map{},
+		config:         cfg,
 	}
 }
 
@@ -234,6 +237,7 @@ func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, content, channel, cha
 		SessionKey:      "heartbeat",
 		Channel:         channel,
 		ChatID:          chatID,
+		SenderID:        "system",
 		UserMessage:     content,
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   false,
@@ -263,16 +267,108 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return al.processSystemMessage(ctx, msg)
 	}
 
+	// Check for agent commands
+	if response, handled := al.handleAgentCommand(ctx, msg); handled {
+		return response, nil
+	}
+
 	// Process as user message
 	return al.runAgentLoop(ctx, processOptions{
 		SessionKey:      msg.SessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
+		SenderID:        msg.SenderID,
 		UserMessage:     msg.Content,
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
 	})
+}
+
+// handleAgentCommand checks if the message is an agent command and handles it
+// Returns (response, true) if handled, ("", false) if not an agent command
+func (al *AgentLoop) handleAgentCommand(ctx context.Context, msg bus.InboundMessage) (string, bool) {
+	content := strings.TrimSpace(msg.Content)
+
+	// Check for /agent commands
+	if !strings.HasPrefix(content, "/agent") {
+		return "", false
+	}
+
+	parts := strings.Fields(content)
+	if len(parts) < 2 {
+		return al.getAgentCommandHelp(), true
+	}
+
+	subcommand := parts[1]
+
+	switch subcommand {
+	case "list":
+		return al.handleAgentList(msg.SessionKey), true
+	case "switch", "use":
+		if len(parts) < 3 {
+			return "Usage: /agent switch <agent-name>", true
+		}
+		agentName := parts[2]
+		if err := al.SwitchAgent(msg.SessionKey, agentName); err != nil {
+			return fmt.Sprintf("Error: %v", err), true
+		}
+		profile := al.config.GetAgentProfile(agentName)
+		return fmt.Sprintf("✓ Switched to '%s' agent\nModel: %s\nTemperature: %.1f", agentName, profile.Model, profile.Temperature), true
+	case "info", "current":
+		info := al.GetCurrentAgentInfo(msg.SessionKey, msg.Channel, msg.SenderID)
+		return al.formatAgentInfo(info), true
+	case "help":
+		return al.getAgentCommandHelp(), true
+	default:
+		return fmt.Sprintf("Unknown command: %s\n%s", subcommand, al.getAgentCommandHelp()), true
+	}
+}
+
+// handleAgentList returns a list of available agents
+func (al *AgentLoop) handleAgentList(sessionKey string) string {
+	agents := al.ListAgents()
+	current := al.sessions.GetCurrentAgent(sessionKey)
+	if current == "" {
+		current = "default"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Available agents:\n")
+	for _, agent := range agents {
+		profile := al.config.GetAgentProfile(agent)
+		marker := "  "
+		if agent == current {
+			marker = "→ "
+		}
+		sb.WriteString(fmt.Sprintf("%s%s (%s)\n", marker, agent, profile.Model))
+	}
+	sb.WriteString("\nUse /agent switch <name> to change agent")
+	return sb.String()
+}
+
+// formatAgentInfo formats agent info for display
+func (al *AgentLoop) formatAgentInfo(info map[string]interface{}) string {
+	return fmt.Sprintf(`Current Agent: %s
+Model: %s
+Temperature: %.1f
+Max Tokens: %d
+Max Iterations: %d`,
+		info["name"],
+		info["model"],
+		info["temperature"],
+		info["max_tokens"],
+		info["max_tool_iterations"],
+	)
+}
+
+// getAgentCommandHelp returns help text for agent commands
+func (al *AgentLoop) getAgentCommandHelp() string {
+	return `Agent Commands:
+/agent list           - List available agents
+/agent switch <name>  - Switch to a different agent
+/agent info           - Show current agent info
+/agent help           - Show this help message`
 }
 
 func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
@@ -341,6 +437,9 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 		}
 	}
 
+	// Get agent profile for this session
+	profile := al.getAgentProfile(opts.SessionKey, opts.Channel, opts.SenderID)
+
 	// 1. Update tool contexts
 	al.updateToolContexts(opts.Channel, opts.ChatID)
 
@@ -351,20 +450,23 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 		history = al.sessions.GetHistory(opts.SessionKey)
 		summary = al.sessions.GetSummary(opts.SessionKey)
 	}
-	messages := al.contextBuilder.BuildMessages(
-		history,
-		summary,
-		opts.UserMessage,
-		nil,
-		opts.Channel,
-		opts.ChatID,
-	)
+
+	// Build context with agent profile
+	contextData := &ContextData{
+		History:      history,
+		Summary:      summary,
+		UserMessage:  opts.UserMessage,
+		Channel:      opts.Channel,
+		ChatID:       opts.ChatID,
+		SystemPrompt: profile.SystemPrompt,
+	}
+	messages := al.contextBuilder.BuildMessagesWithContext(contextData)
 
 	// 3. Save user message to session
 	al.sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
-	// 4. Run LLM iteration loop
-	finalContent, iteration, err := al.runLLMIteration(ctx, messages, opts)
+	// 4. Run LLM iteration loop with agent profile settings
+	finalContent, iteration, err := al.runLLMIteration(ctx, messages, opts, profile)
 	if err != nil {
 		return "", err
 	}
@@ -409,31 +511,64 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 
 // runLLMIteration executes the LLM call loop with tool handling.
 // Returns the final content, iteration count, and any error.
-func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions) (string, int, error) {
+func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.Message, opts processOptions, profile config.AgentProfile) (string, int, error) {
 	iteration := 0
 	var finalContent string
 
-	for iteration < al.maxIterations {
+	// Use profile settings or fallbacks
+	model := al.model
+	if candidates := profile.ModelCandidates(); len(candidates) > 0 {
+		model = candidates[0]
+	}
+	maxTokens := profile.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 8192
+	}
+	temperature := profile.Temperature
+	if temperature == 0 {
+		temperature = 0.7
+	}
+	maxIterations := profile.MaxToolIterations
+	if maxIterations == 0 {
+		maxIterations = al.maxIterations
+	}
+
+	for iteration < maxIterations {
 		iteration++
 
 		logger.DebugCF("agent", "LLM iteration",
 			map[string]interface{}{
 				"iteration": iteration,
-				"max":       al.maxIterations,
+				"max":       maxIterations,
 			})
 
-		// Build tool definitions
-		providerToolDefs := al.tools.ToProviderDefs()
+		// Build tool definitions (filter by allowed tools if specified)
+		var providerToolDefs []providers.ToolDefinition
+		if len(profile.AllowedTools) > 0 {
+			// Filter tools to only allowed ones
+			allTools := al.tools.ToProviderDefs()
+			allowedSet := make(map[string]bool)
+			for _, t := range profile.AllowedTools {
+				allowedSet[t] = true
+			}
+			for _, tool := range allTools {
+				if allowedSet[tool.Function.Name] {
+					providerToolDefs = append(providerToolDefs, tool)
+				}
+			}
+		} else {
+			providerToolDefs = al.tools.ToProviderDefs()
+		}
 
 		// Log LLM request details
 		logger.DebugCF("agent", "LLM request",
 			map[string]interface{}{
 				"iteration":         iteration,
-				"model":             al.model,
+				"model":             model,
 				"messages_count":    len(messages),
 				"tools_count":       len(providerToolDefs),
-				"max_tokens":        8192,
-				"temperature":       0.7,
+				"max_tokens":        maxTokens,
+				"temperature":       temperature,
 				"system_prompt_len": len(messages[0].Content),
 			})
 
@@ -445,10 +580,10 @@ func (al *AgentLoop) runLLMIteration(ctx context.Context, messages []providers.M
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
 
-		// Call LLM
-		response, err := al.provider.Chat(ctx, messages, providerToolDefs, al.model, map[string]interface{}{
-			"max_tokens":  8192,
-			"temperature": 0.7,
+		// Call LLM with profile settings
+		response, err := al.provider.Chat(ctx, messages, providerToolDefs, model, map[string]interface{}{
+			"max_tokens":  maxTokens,
+			"temperature": temperature,
 		})
 
 		if err != nil {
@@ -585,6 +720,100 @@ func (al *AgentLoop) updateToolContexts(channel, chatID string) {
 		if st, ok := tool.(tools.ContextualTool); ok {
 			st.SetContext(channel, chatID)
 		}
+	}
+}
+
+// getAgentProfile returns the agent profile for a session
+// Priority: 1) Routing rules, 2) Session preference, 3) Default
+func (al *AgentLoop) getAgentProfile(sessionKey, channel, senderID string) config.AgentProfile {
+	if al.config == nil {
+		// Fallback to basic defaults if config not available
+		return config.AgentProfile{
+			Model:             al.model,
+			MaxTokens:         al.contextWindow,
+			Temperature:       0.7,
+			MaxToolIterations: al.maxIterations,
+		}
+	}
+
+	// 1. Check routing rules first
+	if channel != "" && senderID != "" {
+		if routedAgent := al.config.GetRoutedAgent(channel, senderID); routedAgent != "" {
+			return al.config.GetAgentProfile(routedAgent)
+		}
+	}
+
+	// 2. Check session preference
+	if sessionAgent := al.sessions.GetCurrentAgent(sessionKey); sessionAgent != "" {
+		return al.config.GetAgentProfile(sessionAgent)
+	}
+
+	// 3. Return default
+	return al.config.GetAgentProfile("default")
+}
+
+// SwitchAgent switches the agent profile for a session
+func (al *AgentLoop) SwitchAgent(sessionKey, agentName string) error {
+	if al.config == nil {
+		return fmt.Errorf("config not available")
+	}
+
+	if !al.config.ProfileExists(agentName) {
+		return fmt.Errorf("agent profile '%s' does not exist", agentName)
+	}
+
+	al.sessions.SetCurrentAgent(sessionKey, agentName)
+	return nil
+}
+
+// ListAgents returns all available agent profile names
+func (al *AgentLoop) ListAgents() []string {
+	if al.config == nil {
+		return []string{"default"}
+	}
+	return al.config.ListAgentProfiles()
+}
+
+// GetCurrentAgentInfo returns information about the current agent for a session
+func (al *AgentLoop) GetCurrentAgentInfo(sessionKey, channel, senderID string) map[string]interface{} {
+	profile := al.getAgentProfile(sessionKey, channel, senderID)
+
+	agentName := al.sessions.GetCurrentAgent(sessionKey)
+	if agentName == "" {
+		// Check routing
+		if channel != "" && senderID != "" {
+			if routed := al.config.GetRoutedAgent(channel, senderID); routed != "" {
+				agentName = routed
+			}
+		}
+	}
+	if agentName == "" {
+		agentName = "default"
+	}
+
+	return map[string]interface{}{
+		"name":                agentName,
+		"model":               profile.Model,
+		"temperature":         profile.Temperature,
+		"max_tokens":          profile.MaxTokens,
+		"max_tool_iterations": profile.MaxToolIterations,
+		"workspace":           profile.Workspace,
+		"system_prompt":       profile.SystemPrompt != "",
+		"allowed_tools":       len(profile.AllowedTools),
+	}
+}
+
+// GetSubagentProfile creates a subagent profile from an agent profile
+func (al *AgentLoop) GetSubagentProfile(agentName string) *tools.SubagentProfile {
+	profile := al.config.GetAgentProfile(agentName)
+	return &tools.SubagentProfile{
+		Model:               profile.Model,
+		Temperature:         profile.Temperature,
+		MaxTokens:           profile.MaxTokens,
+		MaxIterations:       profile.MaxToolIterations,
+		SystemPrompt:        profile.SystemPrompt,
+		Workspace:           profile.Workspace,
+		RestrictToWorkspace: profile.RestrictToWorkspace,
 	}
 }
 
@@ -758,7 +987,15 @@ func (al *AgentLoop) summarizeBatch(ctx context.Context, batch []providers.Messa
 		prompt += fmt.Sprintf("%s: %s\n", m.Role, m.Content)
 	}
 
-	response, err := al.provider.Chat(ctx, []providers.Message{{Role: "user", Content: prompt}}, nil, al.model, map[string]interface{}{
+	model := al.model
+	if al.config != nil {
+		profile := al.config.GetAgentProfile("default")
+		if profile.Model != "" {
+			model = profile.Model
+		}
+	}
+
+	response, err := al.provider.Chat(ctx, []providers.Message{{Role: "user", Content: prompt}}, nil, model, map[string]interface{}{
 		"max_tokens":  1024,
 		"temperature": 0.3,
 	})

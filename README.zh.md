@@ -194,12 +194,17 @@ picoclaw onboard
 
 **2. 配置 (Configure)** (`~/.picoclaw/config.json`)
 
+PicoClaw 现在支持 **每个 Agent 的备用模型**。每个条目可以包含提供商标签和多个候选模型；PicoClaw 将按顺序尝试它们，自动格式化诸如 `z.ai/glm-4.7` 或 `openrouter/z.ai/glm-4.7` 的值。
+
 ```json
 {
   "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
-      "model": "glm-4.7",
+      "models": [
+        { "provider": "z.ai", "model": "glm-4.7" },
+        { "provider": "openrouter", "model": "z.ai/glm-4.7" }
+      ],
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20

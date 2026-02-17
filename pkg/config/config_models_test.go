@@ -243,6 +243,35 @@ func TestAgentProfileModelCandidates(t *testing.T) {
 	}
 }
 
+func TestAgentProfileModelCandidatesNilCase(t *testing.T) {
+	// Test the nil return case - when both ResolvedModels is nil and Model is empty
+	profile := AgentProfile{
+		Model:          "",
+		Models:         nil,
+		ResolvedModels: nil,
+	}
+	
+	result := profile.ModelCandidates()
+	if result != nil {
+		t.Errorf("ModelCandidates() = %v, want nil", result)
+	}
+}
+
+func TestAgentProfileModelCandidatesWithEmptyResolvedModels(t *testing.T) {
+	// Test the case where ResolvedModels is empty but Model is set
+	// This tests the second return branch: return []string{ap.Model}
+	profile := AgentProfile{
+		Model:          "direct-model",
+		Models:         nil,
+		ResolvedModels: []string{}, // Empty but initialized slice
+	}
+	
+	result := profile.ModelCandidates()
+	if len(result) != 1 || result[0] != "direct-model" {
+		t.Errorf("ModelCandidates() = %v, want [direct-model]", result)
+	}
+}
+
 func TestAgentDefaultsPrepareModels(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -354,6 +383,35 @@ func TestAgentDefaultsModelCandidates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAgentDefaultsModelCandidatesNilCase(t *testing.T) {
+	// Test the nil return case - when both ResolvedModels is nil and Model is empty
+	defaults := AgentDefaults{
+		Model:          "",
+		Models:         nil,
+		ResolvedModels: nil,
+	}
+
+	result := defaults.ModelCandidates()
+	if result != nil {
+		t.Errorf("ModelCandidates() = %v, want nil", result)
+	}
+}
+
+func TestAgentDefaultsModelCandidatesWithEmptyResolvedModels(t *testing.T) {
+	// Test the case where ResolvedModels is empty but Model is set
+	// This tests the second return branch: return []string{d.Model}
+	defaults := AgentDefaults{
+		Model:          "direct-model",
+		Models:         nil,
+		ResolvedModels: []string{}, // Empty but initialized slice
+	}
+
+	result := defaults.ModelCandidates()
+	if len(result) != 1 || result[0] != "direct-model" {
+		t.Errorf("ModelCandidates() = %v, want [direct-model]", result)
 	}
 }
 

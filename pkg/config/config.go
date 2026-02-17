@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/caarlos0/env/v11"
@@ -55,17 +56,118 @@ type Config struct {
 }
 
 type AgentsConfig struct {
-	Defaults AgentDefaults `json:"defaults"`
+	Defaults AgentDefaults           `json:"defaults"`
+	Profiles map[string]AgentProfile `json:"profiles,omitempty"`
+	Routing  []RoutingRule           `json:"routing,omitempty"`
+}
+
+type ModelSpec struct {
+	Model    string `json:"model,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
+func (m ModelSpec) ResolvedModel() string {
+	name := strings.TrimSpace(m.Model)
+	provider := strings.TrimSpace(m.Provider)
+	if name == "" {
+		return ""
+	}
+	if provider == "" {
+		return name
+	}
+	return fmt.Sprintf("%s/%s", provider, name)
+}
+
+// AgentProfile defines a named agent configuration that can be selected per session
+type AgentProfile struct {
+	Workspace           string      `json:"workspace,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_WORKSPACE"`
+	RestrictToWorkspace bool        `json:"restrict_to_workspace,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_RESTRICT_TO_WORKSPACE"`
+	Provider            string      `json:"provider,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_PROVIDER"`
+	Model               string      `json:"model,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_MODEL"`
+	MaxTokens           int         `json:"max_tokens,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_MAX_TOKENS"`
+	Temperature         float64     `json:"temperature,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_TEMPERATURE"`
+	MaxToolIterations   int         `json:"max_tool_iterations,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_MAX_TOOL_ITERATIONS"`
+	SystemPrompt        string      `json:"system_prompt,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_SYSTEM_PROMPT"`
+	AllowedTools        []string    `json:"allowed_tools,omitempty" env:"PICOCLAW_AGENTS_PROFILES_{{.Name}}_ALLOWED_TOOLS"`
+	Models              []ModelSpec `json:"models,omitempty"`
+	ResolvedModels      []string    `json:"-"`
+}
+
+func (ap *AgentProfile) prepareModels() {
+	ap.ResolvedModels = buildResolvedModelList(ap.Model, ap.Models)
+	if len(ap.ResolvedModels) > 0 {
+		ap.Model = ap.ResolvedModels[0]
+	}
+}
+
+func (ap AgentProfile) ModelCandidates() []string {
+	if len(ap.ResolvedModels) > 0 {
+		return ap.ResolvedModels
+	}
+	if ap.Model != "" {
+		return []string{ap.Model}
+	}
+	return nil
+}
+
+// RoutingRule defines a rule to automatically assign agents based on channel and user
+type RoutingRule struct {
+	Channel string   `json:"channel" env:"PICOCLAW_AGENTS_ROUTING_{{.Index}}_CHANNEL"`
+	Agent   string   `json:"agent" env:"PICOCLAW_AGENTS_ROUTING_{{.Index}}_AGENT"`
+	UserIDs []string `json:"user_ids,omitempty" env:"PICOCLAW_AGENTS_ROUTING_{{.Index}}_USER_IDS"`
+	UserID  string   `json:"user_id,omitempty" env:"PICOCLAW_AGENTS_ROUTING_{{.Index}}_USER_ID"`
+}
+
+// EffectiveUserIDs returns the configured user IDs for this rule, including deprecated single user ID support.
+func (r *RoutingRule) EffectiveUserIDs() []string {
+	if len(r.UserIDs) == 0 && r.UserID != "" {
+		return []string{r.UserID}
+	}
+	return r.UserIDs
+}
+
+func buildResolvedModelList(base string, specs []ModelSpec) []string {
+	resolved := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		name := spec.ResolvedModel()
+		if name == "" {
+			continue
+		}
+		resolved = append(resolved, name)
+	}
+	if len(resolved) == 0 && base != "" {
+		resolved = append(resolved, base)
+	}
+	return resolved
 }
 
 type AgentDefaults struct {
-	Workspace           string  `json:"workspace" env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	RestrictToWorkspace bool    `json:"restrict_to_workspace" env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
-	Provider            string  `json:"provider" env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
-	Model               string  `json:"model" env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
-	MaxTokens           int     `json:"max_tokens" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
-	Temperature         float64 `json:"temperature" env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
-	MaxToolIterations   int     `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	Workspace           string      `json:"workspace" env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	RestrictToWorkspace bool        `json:"restrict_to_workspace" env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
+	Provider            string      `json:"provider" env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
+	Model               string      `json:"model" env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
+	MaxTokens           int         `json:"max_tokens" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
+	Temperature         float64     `json:"temperature" env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
+	MaxToolIterations   int         `json:"max_tool_iterations" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	Models              []ModelSpec `json:"models,omitempty"`
+	ResolvedModels      []string    `json:"-"`
+}
+
+func (d *AgentDefaults) prepareModels() {
+	d.ResolvedModels = buildResolvedModelList(d.Model, d.Models)
+	if len(d.ResolvedModels) > 0 {
+		d.Model = d.ResolvedModels[0]
+	}
+}
+
+func (d AgentDefaults) ModelCandidates() []string {
+	if len(d.ResolvedModels) > 0 {
+		return d.ResolvedModels
+	}
+	if d.Model != "" {
+		return []string{d.Model}
+	}
+	return nil
 }
 
 type ChannelsConfig struct {
@@ -213,6 +315,15 @@ type WebToolsConfig struct {
 
 type ToolsConfig struct {
 	Web WebToolsConfig `json:"web"`
+}
+
+// PrepareAgentModels resolves configured model specs for defaults and profiles.
+func (c *Config) PrepareAgentModels() {
+	c.Agents.Defaults.prepareModels()
+	for name, profile := range c.Agents.Profiles {
+		profile.prepareModels()
+		c.Agents.Profiles[name] = profile
+	}
 }
 
 func DefaultConfig() *Config {
@@ -439,4 +550,120 @@ func expandHome(path string) string {
 		return home
 	}
 	return path
+}
+
+// GetAgentProfile returns the agent profile by name, merging with defaults
+// If profile doesn't exist, returns defaults
+func (c *Config) GetAgentProfile(name string) AgentProfile {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Start with defaults
+	profile := AgentProfile{
+		Workspace:           c.Agents.Defaults.Workspace,
+		RestrictToWorkspace: c.Agents.Defaults.RestrictToWorkspace,
+		Provider:            c.Agents.Defaults.Provider,
+		Model:               c.Agents.Defaults.Model,
+		Models:              c.Agents.Defaults.Models,
+		ResolvedModels:      c.Agents.Defaults.ResolvedModels,
+		MaxTokens:           c.Agents.Defaults.MaxTokens,
+		Temperature:         c.Agents.Defaults.Temperature,
+		MaxToolIterations:   c.Agents.Defaults.MaxToolIterations,
+	}
+
+	// If name is empty or "default", return defaults
+	if name == "" || name == "default" {
+		profile.prepareModels()
+		return profile
+	}
+
+	// Merge with profile if exists
+	if p, ok := c.Agents.Profiles[name]; ok {
+		if p.Workspace != "" {
+			profile.Workspace = p.Workspace
+		}
+		if p.Provider != "" {
+			profile.Provider = p.Provider
+		}
+		if p.Model != "" {
+			profile.Model = p.Model
+		}
+		if p.MaxTokens != 0 {
+			profile.MaxTokens = p.MaxTokens
+		}
+		if p.Temperature != 0 {
+			profile.Temperature = p.Temperature
+		}
+		if p.MaxToolIterations != 0 {
+			profile.MaxToolIterations = p.MaxToolIterations
+		}
+		if p.SystemPrompt != "" {
+			profile.SystemPrompt = p.SystemPrompt
+		}
+		if len(p.AllowedTools) > 0 {
+			profile.AllowedTools = p.AllowedTools
+		}
+		// Bool fields - always use profile value if explicitly set (not default false)
+		profile.RestrictToWorkspace = p.RestrictToWorkspace
+		if len(p.Models) > 0 {
+			profile.Models = p.Models
+		}
+		if len(p.ResolvedModels) > 0 {
+			profile.ResolvedModels = p.ResolvedModels
+		}
+	}
+	profile.prepareModels()
+
+	return profile
+}
+
+// GetRoutedAgent returns the agent name for a given channel and user ID
+// Returns empty string if no routing rule matches
+func (c *Config) GetRoutedAgent(channel, userID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, rule := range c.Agents.Routing {
+		if rule.Channel != channel {
+			continue
+		}
+		userIDs := rule.EffectiveUserIDs()
+		if len(userIDs) == 0 {
+			return rule.Agent
+		}
+		for _, uid := range userIDs {
+			if uid == "*" && userID != "" {
+				return rule.Agent
+			}
+			if uid == userID {
+				return rule.Agent
+			}
+		}
+	}
+	return ""
+}
+
+// ListAgentProfiles returns all available agent profile names
+func (c *Config) ListAgentProfiles() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	profiles := make([]string, 0, len(c.Agents.Profiles)+1)
+	profiles = append(profiles, "default")
+	for name := range c.Agents.Profiles {
+		profiles = append(profiles, name)
+	}
+	return profiles
+}
+
+// ProfileExists checks if an agent profile exists
+func (c *Config) ProfileExists(name string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if name == "default" || name == "" {
+		return true
+	}
+	_, ok := c.Agents.Profiles[name]
+	return ok
 }

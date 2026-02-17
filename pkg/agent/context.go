@@ -21,6 +21,17 @@ type ContextBuilder struct {
 	tools        *tools.ToolRegistry // Direct reference to tool registry
 }
 
+// ContextData holds all context information for building messages
+type ContextData struct {
+	History      []providers.Message
+	Summary      string
+	UserMessage  string
+	Media        []string
+	Channel      string
+	ChatID       string
+	SystemPrompt string // Custom system prompt override
+}
+
 func getGlobalConfigDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -158,13 +169,30 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 }
 
 func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary string, currentMessage string, media []string, channel, chatID string) []providers.Message {
+	return cb.BuildMessagesWithContext(&ContextData{
+		History:     history,
+		Summary:     summary,
+		UserMessage: currentMessage,
+		Media:       media,
+		Channel:     channel,
+		ChatID:      chatID,
+	})
+}
+
+// BuildMessagesWithContext builds messages with full context control
+func (cb *ContextBuilder) BuildMessagesWithContext(data *ContextData) []providers.Message {
 	messages := []providers.Message{}
 
 	systemPrompt := cb.BuildSystemPrompt()
 
+	// Add custom system prompt override if provided
+	if data.SystemPrompt != "" {
+		systemPrompt += "\n\n## Agent Instructions\n\n" + data.SystemPrompt
+	}
+
 	// Add Current Session info if provided
-	if channel != "" && chatID != "" {
-		systemPrompt += fmt.Sprintf("\n\n## Current Session\nChannel: %s\nChat ID: %s", channel, chatID)
+	if data.Channel != "" && data.ChatID != "" {
+		systemPrompt += fmt.Sprintf("\n\n## Current Session\nChannel: %s\nChat ID: %s", data.Channel, data.ChatID)
 	}
 
 	// Log system prompt summary for debugging (debug mode only)
@@ -185,20 +213,18 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 			"preview": preview,
 		})
 
-	if summary != "" {
-		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
+	if data.Summary != "" {
+		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + data.Summary
 	}
 
-	//This fix prevents the session memory from LLM failure due to elimination of toolu_IDs required from LLM
-	// --- INICIO DEL FIX ---
-	//Diegox-17
+	// Fix for orphaned tool messages that cause LLM failures
+	// Remove leading tool messages from history to prevent LLM errors
+	history := data.History
 	for len(history) > 0 && (history[0].Role == "tool") {
 		logger.DebugCF("agent", "Removing orphaned tool message from history to prevent LLM error",
 			map[string]interface{}{"role": history[0].Role})
 		history = history[1:]
 	}
-	//Diegox-17
-	// --- FIN DEL FIX ---
 
 	messages = append(messages, providers.Message{
 		Role:    "system",
@@ -209,7 +235,7 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 
 	messages = append(messages, providers.Message{
 		Role:    "user",
-		Content: currentMessage,
+		Content: data.UserMessage,
 	})
 
 	return messages
