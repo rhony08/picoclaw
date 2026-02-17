@@ -162,7 +162,7 @@ func TestCreateProviderWithFallback(t *testing.T) {
 			t.Errorf("Expected 2 candidates, got %d", len(candidates))
 		}
 
-		expected := []string{"z.ai/glm-4.7", "anthropic/claude-3"}
+		expected := []string{"glm-4.7", "claude-3"}
 		for i, candidate := range candidates {
 			if candidate != expected[i] {
 				t.Errorf("Candidate %d = %s, want %s", i, candidate, expected[i])
@@ -244,7 +244,7 @@ func TestModelDisplayLogic(t *testing.T) {
 				cfg.PrepareAgentModels()
 				return cfg
 			},
-			expectedOutput: "Models: z.ai/glm-4.7, anthropic/claude-3 (first: z.ai/glm-4.7)\n",
+			expectedOutput: "Models: glm-4.7, claude-3 (first: glm-4.7)\n",
 		},
 		{
 			name: "No model",

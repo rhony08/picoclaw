@@ -52,7 +52,7 @@ func TestAgentsConfig_GetAgentProfile(t *testing.T) {
 		{
 			name:          "coder profile",
 			profileName:   "coder",
-			wantModel:     "anthropic/claude-opus-4",
+			wantModel:     "claude-opus-4",
 			wantTemp:      0.2,
 			wantMaxTokens: 8192,
 		},

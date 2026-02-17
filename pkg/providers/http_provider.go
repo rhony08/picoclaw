@@ -19,6 +19,8 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type HTTPProvider struct {
@@ -105,8 +107,33 @@ func (p *HTTPProvider) Chat(ctx context.Context, messages []Message, tools []Too
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	// Retry configuration for transient network errors
+	retryConfig := utils.RetryConfig{
+		MaxRetries:  2,
+		InitialWait: 2 * time.Second,
+		MaxWait:     10 * time.Second,
+	}
+
+	var resp *http.Response
+	err = utils.RetryWithBackoff(ctx, retryConfig, func() error {
+		var doErr error
+		resp, doErr = p.httpClient.Do(req)
+		if doErr != nil {
+			if utils.IsRetryableError(doErr) {
+				logger.WarnCF("provider", "Retryable error during LLM request, will retry",
+					map[string]interface{}{
+						"error": utils.GetRetryableErrorMessage(doErr),
+					})
+			}
+			return doErr
+		}
+		return nil
+	})
+
 	if err != nil {
+		if utils.IsRetryableError(err) {
+			return nil, fmt.Errorf("LLM request failed after retries: %s", utils.GetRetryableErrorMessage(err))
+		}
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()

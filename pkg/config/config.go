@@ -67,15 +67,11 @@ type ModelSpec struct {
 }
 
 func (m ModelSpec) ResolvedModel() string {
+	// Return just the model name without provider prefix.
+	// The provider field is used for routing/config purposes only,
+	// not for the actual API call. The API expects just the model name.
 	name := strings.TrimSpace(m.Model)
-	provider := strings.TrimSpace(m.Provider)
-	if name == "" {
-		return ""
-	}
-	if provider == "" {
-		return name
-	}
-	return fmt.Sprintf("%s/%s", provider, name)
+	return name
 }
 
 // AgentProfile defines a named agent configuration that can be selected per session

@@ -81,6 +81,38 @@ func (c *TelegramChannel) SetTranscriber(transcriber *voice.GroqTranscriber) {
 func (c *TelegramChannel) Start(ctx context.Context) error {
 	logger.InfoC("telegram", "Starting Telegram bot (polling mode)...")
 
+	// Verify bot connectivity with retries before starting long polling
+	retryConfig := utils.RetryConfig{
+		MaxRetries:  3,
+		InitialWait: 2 * time.Second,
+		MaxWait:     15 * time.Second,
+	}
+
+	err := utils.RetryWithBackoff(ctx, retryConfig, func() error {
+		_, err := c.bot.GetMe(ctx)
+		if err != nil {
+			if utils.IsRetryableError(err) {
+				logger.WarnCF("telegram", "Network error connecting to Telegram, will retry",
+					map[string]interface{}{
+						"error": utils.GetRetryableErrorMessage(err),
+					})
+			}
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
+		if utils.IsRetryableError(err) {
+			return fmt.Errorf("failed to connect to Telegram after retries: %s", utils.GetRetryableErrorMessage(err))
+		}
+		return fmt.Errorf("failed to verify bot connection: %w", err)
+	}
+
+	logger.InfoCF("telegram", "Bot identity verified", map[string]interface{}{
+		"username": c.bot.Username(),
+	})
+
 	updates, err := c.bot.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
 		Timeout: 30,
 	})
@@ -89,7 +121,7 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	}
 
 	c.setRunning(true)
-	logger.InfoCF("telegram", "Telegram bot connected", map[string]interface{}{
+	logger.InfoCF("telegram", "Telegram bot connected and listening for updates", map[string]interface{}{
 		"username": c.bot.Username(),
 	})
 
