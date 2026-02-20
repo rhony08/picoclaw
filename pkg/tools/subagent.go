@@ -14,6 +14,7 @@ type SubagentTask struct {
 	ID            string
 	Task          string
 	Label         string
+	AgentID       string
 	OriginChannel string
 	OriginChatID  string
 	Status        string
@@ -22,15 +23,19 @@ type SubagentTask struct {
 }
 
 type SubagentManager struct {
-	tasks         map[string]*SubagentTask
-	mu            sync.RWMutex
-	provider      providers.LLMProvider
-	defaultModel  string
-	bus           *bus.MessageBus
-	workspace     string
-	tools         *ToolRegistry
-	maxIterations int
-	nextID        int
+	tasks          map[string]*SubagentTask
+	mu             sync.RWMutex
+	provider       providers.LLMProvider
+	defaultModel   string
+	bus            *bus.MessageBus
+	workspace      string
+	tools          *ToolRegistry
+	maxIterations  int
+	maxTokens      int
+	temperature    float64
+	hasMaxTokens   bool
+	hasTemperature bool
+	nextID         int
 }
 
 func NewSubagentManager(provider providers.LLMProvider, defaultModel, workspace string, bus *bus.MessageBus) *SubagentManager {
@@ -46,15 +51,14 @@ func NewSubagentManager(provider providers.LLMProvider, defaultModel, workspace 
 	}
 }
 
-// SubagentProfile defines configuration for a subagent
-type SubagentProfile struct {
-	Model               string
-	Temperature         float64
-	MaxTokens           int
-	MaxIterations       int
-	SystemPrompt        string
-	Workspace           string
-	RestrictToWorkspace bool
+// SetLLMOptions sets max tokens and temperature for subagent LLM calls.
+func (sm *SubagentManager) SetLLMOptions(maxTokens int, temperature float64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.maxTokens = maxTokens
+	sm.hasMaxTokens = true
+	sm.temperature = temperature
+	sm.hasTemperature = true
 }
 
 // SetTools sets the tool registry for subagent execution.
@@ -72,12 +76,7 @@ func (sm *SubagentManager) RegisterTool(tool Tool) {
 	sm.tools.Register(tool)
 }
 
-func (sm *SubagentManager) Spawn(ctx context.Context, task, label, originChannel, originChatID string, callback AsyncCallback) (string, error) {
-	return sm.SpawnWithProfile(ctx, task, label, originChannel, originChatID, nil, callback)
-}
-
-// SpawnWithProfile spawns a subagent with a specific profile configuration
-func (sm *SubagentManager) SpawnWithProfile(ctx context.Context, task, label, originChannel, originChatID string, profile *SubagentProfile, callback AsyncCallback) (string, error) {
+func (sm *SubagentManager) Spawn(ctx context.Context, task, label, agentID, originChannel, originChatID string, callback AsyncCallback) (string, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -88,6 +87,7 @@ func (sm *SubagentManager) SpawnWithProfile(ctx context.Context, task, label, or
 		ID:            taskID,
 		Task:          task,
 		Label:         label,
+		AgentID:       agentID,
 		OriginChannel: originChannel,
 		OriginChatID:  originChatID,
 		Status:        "running",
@@ -96,7 +96,7 @@ func (sm *SubagentManager) SpawnWithProfile(ctx context.Context, task, label, or
 	sm.tasks[taskID] = subagentTask
 
 	// Start task in background with context cancellation support
-	go sm.runTaskWithProfile(ctx, subagentTask, profile, callback)
+	go sm.runTask(ctx, subagentTask, callback)
 
 	if label != "" {
 		return fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task), nil
@@ -105,40 +105,13 @@ func (sm *SubagentManager) SpawnWithProfile(ctx context.Context, task, label, or
 }
 
 func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, callback AsyncCallback) {
-	sm.runTaskWithProfile(ctx, task, nil, callback)
-}
-
-// runTaskWithProfile runs a subagent task with optional profile configuration
-func (sm *SubagentManager) runTaskWithProfile(ctx context.Context, task *SubagentTask, profile *SubagentProfile, callback AsyncCallback) {
 	task.Status = "running"
 	task.Created = time.Now().UnixMilli()
 
-	// Use profile settings or defaults
-	model := sm.defaultModel
-	temperature := 0.7
-	maxTokens := 4096
-	maxIterations := sm.maxIterations
+	// Build system prompt for subagent
 	systemPrompt := `You are a subagent. Complete the given task independently and report the result.
 You have access to tools - use them as needed to complete your task.
 After completing the task, provide a clear summary of what was done.`
-
-	if profile != nil {
-		if profile.Model != "" {
-			model = profile.Model
-		}
-		if profile.Temperature != 0 {
-			temperature = profile.Temperature
-		}
-		if profile.MaxTokens != 0 {
-			maxTokens = profile.MaxTokens
-		}
-		if profile.MaxIterations != 0 {
-			maxIterations = profile.MaxIterations
-		}
-		if profile.SystemPrompt != "" {
-			systemPrompt = profile.SystemPrompt
-		}
-	}
 
 	messages := []providers.Message{
 		{
@@ -165,17 +138,30 @@ After completing the task, provide a clear summary of what was done.`
 	// Run tool loop with access to tools
 	sm.mu.RLock()
 	tools := sm.tools
+	maxIter := sm.maxIterations
+	maxTokens := sm.maxTokens
+	temperature := sm.temperature
+	hasMaxTokens := sm.hasMaxTokens
+	hasTemperature := sm.hasTemperature
 	sm.mu.RUnlock()
+
+	var llmOptions map[string]any
+	if hasMaxTokens || hasTemperature {
+		llmOptions = map[string]any{}
+		if hasMaxTokens {
+			llmOptions["max_tokens"] = maxTokens
+		}
+		if hasTemperature {
+			llmOptions["temperature"] = temperature
+		}
+	}
 
 	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
 		Provider:      sm.provider,
-		Model:         model,
+		Model:         sm.defaultModel,
 		Tools:         tools,
-		MaxIterations: maxIterations,
-		LLMOptions: map[string]any{
-			"max_tokens":  maxTokens,
-			"temperature": temperature,
-		},
+		MaxIterations: maxIter,
+		LLMOptions:    llmOptions,
 	}, messages, task.OriginChannel, task.OriginChatID)
 
 	sm.mu.Lock()
@@ -323,19 +309,30 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]interface{})
 	sm.mu.RLock()
 	tools := sm.tools
 	maxIter := sm.maxIterations
+	maxTokens := sm.maxTokens
+	temperature := sm.temperature
+	hasMaxTokens := sm.hasMaxTokens
+	hasTemperature := sm.hasTemperature
 	sm.mu.RUnlock()
+
+	var llmOptions map[string]any
+	if hasMaxTokens || hasTemperature {
+		llmOptions = map[string]any{}
+		if hasMaxTokens {
+			llmOptions["max_tokens"] = maxTokens
+		}
+		if hasTemperature {
+			llmOptions["temperature"] = temperature
+		}
+	}
 
 	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
 		Provider:      sm.provider,
 		Model:         sm.defaultModel,
 		Tools:         tools,
 		MaxIterations: maxIter,
-		LLMOptions: map[string]any{
-			"max_tokens":  4096,
-			"temperature": 0.7,
-		},
+		LLMOptions:    llmOptions,
 	}, messages, t.originChannel, t.originChatID)
-
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
 	}
