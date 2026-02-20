@@ -21,6 +21,17 @@ type ContextBuilder struct {
 	tools        *tools.ToolRegistry // Direct reference to tool registry
 }
 
+// ContextData holds all context information for building messages
+type ContextData struct {
+	History      []providers.Message
+	Summary      string
+	UserMessage  string
+	Media        []string
+	Channel      string
+	ChatID       string
+	SystemPrompt string // Custom system prompt override
+}
+
 func getGlobalConfigDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -158,13 +169,30 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 }
 
 func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary string, currentMessage string, media []string, channel, chatID string) []providers.Message {
+	return cb.BuildMessagesWithContext(&ContextData{
+		History:     history,
+		Summary:     summary,
+		UserMessage: currentMessage,
+		Media:       media,
+		Channel:     channel,
+		ChatID:      chatID,
+	})
+}
+
+// BuildMessagesWithContext builds messages with full context control
+func (cb *ContextBuilder) BuildMessagesWithContext(data *ContextData) []providers.Message {
 	messages := []providers.Message{}
 
 	systemPrompt := cb.BuildSystemPrompt()
 
+	// Add custom system prompt override if provided
+	if data.SystemPrompt != "" {
+		systemPrompt += "\n\n## Agent Instructions\n\n" + data.SystemPrompt
+	}
+
 	// Add Current Session info if provided
-	if channel != "" && chatID != "" {
-		systemPrompt += fmt.Sprintf("\n\n## Current Session\nChannel: %s\nChat ID: %s", channel, chatID)
+	if data.Channel != "" && data.ChatID != "" {
+		systemPrompt += fmt.Sprintf("\n\n## Current Session\nChannel: %s\nChat ID: %s", data.Channel, data.ChatID)
 	}
 
 	// Log system prompt summary for debugging (debug mode only)
@@ -185,11 +213,11 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 			"preview": preview,
 		})
 
-	if summary != "" {
-		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + summary
+	if data.Summary != "" {
+		systemPrompt += "\n\n## Summary of Previous Conversation\n\n" + data.Summary
 	}
 
-	history = sanitizeHistoryForProvider(history)
+	history := sanitizeHistoryForProvider(data.History)
 
 	messages = append(messages, providers.Message{
 		Role:    "system",
@@ -198,10 +226,10 @@ func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary str
 
 	messages = append(messages, history...)
 
-	if strings.TrimSpace(currentMessage) != "" {
+	if strings.TrimSpace(data.UserMessage) != "" {
 		messages = append(messages, providers.Message{
 			Role:    "user",
-			Content: currentMessage,
+			Content: data.UserMessage,
 		})
 	}
 

@@ -7,7 +7,49 @@
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20
-    }
+    },
+    "profiles": {
+      "coder": {
+        "models": [
+          { "provider": "anthropic", "model": "claude-opus-4" }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 8192,
+        "max_tool_iterations": 30,
+        "system_prompt": "You are an expert programmer. Focus on writing clean, efficient, and well-documented code. Always explain your implementation choices."
+      },
+      "researcher": {
+        "model": "openai/gpt-4",
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "max_tool_iterations": 15,
+        "system_prompt": "You are a research assistant. Provide thorough, accurate information with sources when possible. Be objective and comprehensive."
+      },
+      "creative": {
+        "model": "gemini-pro",
+        "temperature": 0.9,
+        "max_tokens": 4096,
+        "max_tool_iterations": 10,
+        "system_prompt": "You are a creative assistant. Think outside the box and provide innovative ideas and solutions."
+      }
+    },
+    "routing": [
+      {
+        "channel": "telegram",
+        "agent": "coder",
+        "user_ids": ["*"]
+      },
+      {
+        "channel": "discord",
+        "agent": "researcher",
+        "user_ids": ["987654321"]
+      },
+      {
+        "channel": "line",
+        "agent": "creative",
+        "user_ids": ["*", "555555555"]
+      }
+    ]
   },
   "model_list": [
     {

@@ -172,12 +172,17 @@ picoclaw onboard
 
 **2. 設定** (`~/.picoclaw/config.json`)
 
+PicoClaw は**エージェントごとのフォールバックモデル**をサポートしています。各エントリにはプロバイダータグと複数の候補を含めることができ、PicoClaw は順番に試行し、`z.ai/glm-4.7` や `openrouter/z.ai/glm-4.7` などの値を自動的にフォーマットします。
+
 ```json
 {
   "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
-      "model": "glm-4.7",
+      "models": [
+        { "provider": "z.ai", "model": "glm-4.7" },
+        { "provider": "openrouter", "model": "z.ai/glm-4.7" }
+      ],
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20

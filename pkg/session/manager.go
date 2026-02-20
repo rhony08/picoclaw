@@ -12,11 +12,12 @@ import (
 )
 
 type Session struct {
-	Key      string              `json:"key"`
-	Messages []providers.Message `json:"messages"`
-	Summary  string              `json:"summary,omitempty"`
-	Created  time.Time           `json:"created"`
-	Updated  time.Time           `json:"updated"`
+	Key          string              `json:"key"`
+	CurrentAgent string              `json:"current_agent,omitempty"`
+	Messages     []providers.Message `json:"messages"`
+	Summary      string              `json:"summary,omitempty"`
+	Created      time.Time           `json:"created"`
+	Updated      time.Time           `json:"updated"`
 }
 
 type SessionManager struct {
@@ -145,6 +146,37 @@ func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
 	session.Updated = time.Now()
 }
 
+// GetCurrentAgent returns the current agent profile name for a session
+// Returns empty string if not set (meaning use default)
+func (sm *SessionManager) GetCurrentAgent(key string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		return ""
+	}
+	return session.CurrentAgent
+}
+
+// SetCurrentAgent sets the current agent profile name for a session
+func (sm *SessionManager) SetCurrentAgent(key, agentName string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		session = &Session{
+			Key:      key,
+			Messages: []providers.Message{},
+			Created:  time.Now(),
+		}
+		sm.sessions[key] = session
+	}
+	session.CurrentAgent = agentName
+	session.Updated = time.Now()
+}
+
 // sanitizeFilename converts a session key into a cross-platform safe filename.
 // Session keys use "channel:chatID" (e.g. "telegram:123456") but ':' is the
 // volume separator on Windows, so filepath.Base would misinterpret the key.
@@ -178,10 +210,11 @@ func (sm *SessionManager) Save(key string) error {
 	}
 
 	snapshot := Session{
-		Key:     stored.Key,
-		Summary: stored.Summary,
-		Created: stored.Created,
-		Updated: stored.Updated,
+		Key:          stored.Key,
+		CurrentAgent: stored.CurrentAgent,
+		Summary:      stored.Summary,
+		Created:      stored.Created,
+		Updated:      stored.Updated,
 	}
 	if len(stored.Messages) > 0 {
 		snapshot.Messages = make([]providers.Message, len(stored.Messages))
