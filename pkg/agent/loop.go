@@ -37,6 +37,7 @@ type AgentLoop struct {
 	summarizing    sync.Map
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
+	sessionAgents  sync.Map // sessionKey -> agentID for per-session agent switching
 }
 
 // processOptions configures how a message is processed
@@ -289,6 +290,19 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	sessionKey := route.SessionKey
 	if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
 		sessionKey = msg.SessionKey
+	}
+
+	// Check for session-based agent preference (user-switched agent)
+	if sessionAgentID, hasSessionAgent := al.getSessionAgent(sessionKey); hasSessionAgent {
+		if sessionAgent, ok := al.registry.GetAgent(sessionAgentID); ok {
+			agent = sessionAgent
+			logger.InfoCF("agent", "Using session-preferred agent",
+				map[string]interface{}{
+					"session_key":      sessionKey,
+					"session_agent_id": sessionAgentID,
+					"routed_agent_id":  route.AgentID,
+				})
+		}
 	}
 
 	logger.InfoCF("agent", "Routed message",
@@ -1052,9 +1066,141 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 		default:
 			return fmt.Sprintf("Unknown switch target: %s", target), true
 		}
+
+	case "/agent":
+		if len(args) < 1 {
+			return al.getAgentCommandHelp(), true
+		}
+
+		subcommand := args[0]
+		sessionKey := msg.SessionKey
+		if sessionKey == "" {
+			sessionKey = "default"
+		}
+
+		switch subcommand {
+		case "list":
+			return al.handleAgentList(), true
+		case "switch", "use":
+			if len(args) < 2 {
+				return "Usage: /agent switch <agent-id>", true
+			}
+			agentID := args[1]
+			return al.handleAgentSwitch(sessionKey, agentID), true
+		case "info", "current":
+			return al.handleAgentInfo(sessionKey), true
+		case "help":
+			return al.getAgentCommandHelp(), true
+		default:
+			return fmt.Sprintf("Unknown agent command: %s\n%s", subcommand, al.getAgentCommandHelp()), true
+		}
 	}
 
 	return "", false
+}
+
+// handleAgentList returns a list of available agents.
+func (al *AgentLoop) handleAgentList() string {
+	agentIDs := al.registry.ListAgentIDs()
+	if len(agentIDs) == 0 {
+		return "No agents configured."
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Available agents:\n")
+	for _, id := range agentIDs {
+		if agent, ok := al.registry.GetAgent(id); ok {
+			sb.WriteString(fmt.Sprintf("  • %s", id))
+			if agent.Name != "" {
+				sb.WriteString(fmt.Sprintf(" (%s)", agent.Name))
+			}
+			if agent.Model != "" {
+				sb.WriteString(fmt.Sprintf(" - %s", agent.Model))
+			}
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\nUse /agent switch <agent-id> to change agent for this session.")
+	return sb.String()
+}
+
+// handleAgentSwitch switches the agent for a session.
+func (al *AgentLoop) handleAgentSwitch(sessionKey, agentID string) string {
+	agent, ok := al.registry.GetAgent(agentID)
+	if !ok {
+		return fmt.Sprintf("Error: Agent '%s' not found. Use /agent list to see available agents.", agentID)
+	}
+
+	al.setSessionAgent(sessionKey, agentID)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("✓ Switched to agent '%s'", agentID))
+	if agent.Name != "" {
+		sb.WriteString(fmt.Sprintf(" (%s)", agent.Name))
+	}
+	sb.WriteString("\n")
+	if agent.Model != "" {
+		sb.WriteString(fmt.Sprintf("Model: %s\n", agent.Model))
+	}
+	sb.WriteString("\nThis session will now use this agent. Use /agent info to check current agent.")
+	return sb.String()
+}
+
+// handleAgentInfo returns information about the current agent for a session.
+func (al *AgentLoop) handleAgentInfo(sessionKey string) string {
+	agentID := "default"
+	if id, ok := al.getSessionAgent(sessionKey); ok {
+		agentID = id
+	}
+
+	agent, ok := al.registry.GetAgent(agentID)
+	if !ok {
+		// Fallback to default agent
+		agent = al.registry.GetDefaultAgent()
+		if agent == nil {
+			return "No agent available."
+		}
+		agentID = agent.ID
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Current Agent: %s", agentID))
+	if agent.Name != "" {
+		sb.WriteString(fmt.Sprintf(" (%s)", agent.Name))
+	}
+	sb.WriteString("\n")
+	if agent.Model != "" {
+		sb.WriteString(fmt.Sprintf("Model: %s\n", agent.Model))
+	}
+	if agent.Workspace != "" {
+		sb.WriteString(fmt.Sprintf("Workspace: %s\n", agent.Workspace))
+	}
+	if len(agent.SkillsFilter) > 0 {
+		sb.WriteString(fmt.Sprintf("Skills: %s\n", strings.Join(agent.SkillsFilter, ", ")))
+	}
+	if agent.Subagents != nil && len(agent.Subagents.AllowAgents) > 0 {
+		sb.WriteString(fmt.Sprintf("Can spawn: %s\n", strings.Join(agent.Subagents.AllowAgents, ", ")))
+	}
+
+	// Check if using session override
+	if _, hasSessionAgent := al.getSessionAgent(sessionKey); hasSessionAgent {
+		sb.WriteString("\n(Using session-specific agent override)")
+	} else {
+		sb.WriteString("\n(Using config-based routing)")
+	}
+
+	return sb.String()
+}
+
+// getAgentCommandHelp returns help text for agent commands.
+func (al *AgentLoop) getAgentCommandHelp() string {
+	return `Agent Commands:
+  /agent list           - List available agents
+  /agent switch <id>    - Switch to a different agent for this session
+  /agent info           - Show current agent info
+  /agent help           - Show this help message
+
+Note: Agent switching is per-session. Config-based routing applies by default.`
 }
 
 // extractPeer extracts the routing peer from inbound message metadata.
@@ -1082,4 +1228,27 @@ func extractParentPeer(msg bus.InboundMessage) *routing.RoutePeer {
 		return nil
 	}
 	return &routing.RoutePeer{Kind: parentKind, ID: parentID}
+}
+
+// getSessionAgent returns the agent ID for a session if one has been set.
+func (al *AgentLoop) getSessionAgent(sessionKey string) (string, bool) {
+	if val, ok := al.sessionAgents.Load(sessionKey); ok {
+		return val.(string), true
+	}
+	return "", false
+}
+
+// setSessionAgent sets the agent ID for a session.
+func (al *AgentLoop) setSessionAgent(sessionKey, agentID string) {
+	al.sessionAgents.Store(sessionKey, agentID)
+}
+
+// clearSessionAgent clears the agent preference for a session.
+func (al *AgentLoop) clearSessionAgent(sessionKey string) {
+	al.sessionAgents.Delete(sessionKey)
+}
+
+// listSessionAgents returns all registered agent IDs.
+func (al *AgentLoop) listSessionAgents() []string {
+	return al.registry.ListAgentIDs()
 }
